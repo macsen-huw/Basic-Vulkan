@@ -12,6 +12,10 @@
 #include <cstdint>
 #include <cstring>
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_vulkan.h"
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -171,7 +175,7 @@ namespace
 	void update_user_state(UserState&, float aElapsedTime);
 
 	lut::RenderPass create_render_pass(lut::VulkanWindow const&);
-	//lut::RenderPass create_storage_render_pass(lut::VulkanWindow const& aWindow);
+	lut::RenderPass create_imgui_render_pass(lut::VulkanWindow const& aWindow);
 
 	TexturedMesh create_textured_mesh(labutils::VulkanContext const& aContext, labutils::Allocator const& aAllocator, float aPositions[], float aTexCoords[], size_t aVertCount);
 	ColorizedMesh create_coloured_mesh(labutils::VulkanContext const& aContext, labutils::Allocator const& aAllocator, float aPositions[], float aColor[], size_t aVertCount);
@@ -217,6 +221,9 @@ namespace
 		VkSemaphore,
 		bool& aNeedToRecreateSwapchain
 	);
+
+	void InitImgui();
+	void create_imgui_framebuffers(lut::VulkanWindow const&, VkRenderPass, std::vector<lut::Framebuffer>&);
 }
 
 int main() try
@@ -287,7 +294,6 @@ int main() try
 
 	lut::Semaphore imageAvailable = lut::create_semaphore(window);
 	lut::Semaphore renderFinished = lut::create_semaphore(window);
-
 
 	//Load the mesh
 	SimpleModel meshes = load_simple_wavefront_obj("assets/cw1/sponza_with_ship.obj");
@@ -431,7 +437,7 @@ int main() try
 
 		vkUpdateDescriptorSets(window.device, numSets, desc, 0, nullptr);
 	}
-
+	/*
 #ifdef OVERDRAW
 	//Setting up storage image for overdrawing visualization
 	lut::Image storageImage;
@@ -523,6 +529,58 @@ int main() try
 	}
 
 #endif
+*/
+	//Get image count for ImGUi
+
+	std::uint32_t imageCount = 0;
+	vkGetSwapchainImagesKHR(window.device, window.swapchain, &imageCount, nullptr);
+
+	//Setup ImGui
+	//InitImgui();
+
+	//Setup dear Imgui Context
+	IMGUI_CHECKVERSION();
+
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+	ImGui::StyleColorsDark();
+
+	ImGui_ImplGlfw_InitForVulkan(window.window, true);
+	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.Instance = window.instance;
+	init_info.PhysicalDevice = window.physicalDevice;
+	init_info.Device = window.device;
+	init_info.QueueFamily = window.graphicsFamilyIndex;
+	init_info.Queue = window.graphicsQueue;
+	init_info.PipelineCache = VK_NULL_HANDLE;
+	init_info.DescriptorPool = dpool.handle;
+	init_info.Allocator = nullptr;
+	init_info.MinImageCount = imageCount;
+	init_info.ImageCount = imageCount;
+	
+	lut::RenderPass imguiRenderPass = create_imgui_render_pass(window);
+
+	init_info.RenderPass = imguiRenderPass.handle;
+
+	ImGui_ImplVulkan_Init(&init_info);
+
+
+	std::vector<lut::Framebuffer> imGuiframebuffers;
+	create_imgui_framebuffers(window, imguiRenderPass.handle, imGuiframebuffers);
+
+	std::vector<VkCommandBuffer> imguicbuffers;
+	std::vector<lut::Fence> imguicbfences;
+
+	for (std::size_t i = 0; i < imGuiframebuffers.size(); ++i)
+	{
+		imguicbuffers.emplace_back(lut::alloc_command_buffer(window, cpool.handle));
+		imguicbfences.emplace_back(lut::create_fence(window, VK_FENCE_CREATE_SIGNALED_BIT));
+	}
+
+	ImGui_ImplVulkan_CreateFontsTexture();
+
+	lut::Semaphore imguiSemaphore = lut::create_semaphore(window);
 
 
 	// Application main loop
@@ -553,13 +611,23 @@ int main() try
 			auto const changes = lut::recreate_swapchain(window);
 
 			if (changes.changedFormat)
+			{
 				renderPass = create_render_pass(window);
+				imguiRenderPass = create_imgui_render_pass(window);
+			}
+				
 
 			if (changes.changedSize)
 				std::tie(depthBuffer, depthBufferView) = create_depth_buffer(window, allocator);
 
 			framebuffers.clear();
+			imGuiframebuffers.clear();
+
 			create_swapchain_framebuffers(window, renderPass.handle, framebuffers, depthBufferView.handle);
+			create_imgui_framebuffers(window, imguiRenderPass.handle, imGuiframebuffers);
+
+			//Recreate semaphore
+			imageAvailable = lut::create_semaphore(window);
 
 			if (changes.changedSize)
 			{
@@ -717,17 +785,85 @@ int main() try
 		}
 
 		//Submit the recorded commands
-		submit_commands(window, cbuffers[imageIndex], cbfences[imageIndex].handle, imageAvailable.handle, renderFinished.handle);
+		submit_commands(window, cbuffers[imageIndex], cbfences[imageIndex].handle, imageAvailable.handle, imguiSemaphore.handle);
+
+		//Preparation for second pass
+		//Wait for command buffer to be available
+		assert(std::size_t(imageIndex) < imguicbfences.size());
+
+		if (auto const res = vkWaitForFences(window.device, 1, &imguicbfences[imageIndex].handle, VK_TRUE, std::numeric_limits<std::uint64_t>::max()); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to wait for command buffer fence %u\n" "vkWaitForFences() returned %s", imageIndex, lut::to_string(res).c_str());
+		}
+
+		if (auto const res = vkResetFences(window.device, 1, &imguicbfences[imageIndex].handle); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to reset command buffer fence %u\n" "vkResetFences() returned %s", imageIndex, lut::to_string(res).c_str());
+		}
+
+		//It is available, so begin recording
+		begInfo = {};
+		begInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		begInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		begInfo.pInheritanceInfo = nullptr;
+
+		if (auto const res = vkBeginCommandBuffer(imguicbuffers[imageIndex], &begInfo); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to begin recording command buffer\n" "vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str());
+		}
+
+		VkRenderPassBeginInfo imguiPassInfo = passInfo;
+		imguiPassInfo.framebuffer = imGuiframebuffers[imageIndex].handle;
+		imguiPassInfo.renderPass = imguiRenderPass.handle;
+		imguiPassInfo.clearValueCount = 1;
+		imguiPassInfo.pClearValues = &clearValues[0];
+
+		vkCmdBeginRenderPass(imguicbuffers[imageIndex], &imguiPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+		
+		//Setup new ImGui frame
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+		ImGui::Begin("This finally works!");
+		ImGui::Text("This is text to show that works?");
+		ImGui::End();
+
+
+		ImGui::Render();
+		ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), imguicbuffers[imageIndex]);
+
+		vkCmdEndRenderPass(imguicbuffers[imageIndex]);
+
+		//End command recording
+		if (auto const res = vkEndCommandBuffer(imguicbuffers[imageIndex]); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to end recording command buffer\n" "vkEndCommandBuffer() returned %s", lut::to_string(res).c_str());
+		}
+
+		//Submit commands
+		submit_commands(window, imguicbuffers[imageIndex], imguicbfences[imageIndex].handle, imguiSemaphore.handle, renderFinished.handle);
 
 		present_results(window.presentQueue, window.swapchain, imageIndex, renderFinished.handle, recreateSwapchain);
 
+		//Ensure the command buffers have finished (throws an error if not)
+		if (auto const res = vkWaitForFences(window.device, 1, &imguicbfences[imageIndex].handle, VK_TRUE, std::numeric_limits<std::uint64_t>::max()); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to wait for command buffer fence %u\n" "vkWaitForFences() returned %s", imageIndex, lut::to_string(res).c_str());
+		}
+
 	}
 
-	// Cleanup takes place automatically in the destructors, but we sill need
+
+	//End ImGui
+	ImGui_ImplVulkan_Shutdown();
+	ImGui_ImplGlfw_Shutdown();
+	ImGui::DestroyContext();
+
+	// Cleanup takes place automatically in the destructors, but we still need
 	// to ensure that all Vulkan commands have finished before that.
 
 	vkDeviceWaitIdle(window.device);
-
+	
 	return 0;
 }
 catch (std::exception const& eErr)
@@ -895,7 +1031,7 @@ namespace
 		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 		attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 		attachments[1].format = cfg::kDepthFormat;
 		attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -956,19 +1092,36 @@ namespace
 
 		return lut::RenderPass(aWindow.device, rpass);
 	}
-	/*
-	lut::RenderPass create_storage_render_pass(lut::VulkanWindow const& aWindow)
+	
+	lut::RenderPass create_imgui_render_pass(lut::VulkanWindow const& aWindow)
 	{
 		VkAttachmentDescription attachments[1]{};
-		attachments[0].format = VK_FORMAT_R32_UINT;
+		attachments[0].format = aWindow.swapchainFormat;
 		attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 		attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
+		VkAttachmentReference colourAttachment = {};
+		colourAttachment.attachment = 0;
+		colourAttachment.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
 		VkSubpassDescription subpasses[1]{};
-		subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_COMPUTE; //Set to compute for counting
+		subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpasses[0].colorAttachmentCount = 1;
+		subpasses[0].pColorAttachments = &colourAttachment;
+
+		//Introduce a dependency
+		VkSubpassDependency deps = {};
+		deps.srcSubpass = VK_SUBPASS_EXTERNAL;
+		deps.srcAccessMask = 0;
+		deps.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		deps.dstSubpass = 0;
+		deps.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		deps.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+
 
 		//With declarations in place, we can now create the render pass
 		VkRenderPassCreateInfo passInfo{};
@@ -977,6 +1130,8 @@ namespace
 		passInfo.pAttachments = attachments;
 		passInfo.subpassCount = 1;
 		passInfo.pSubpasses = subpasses;
+		passInfo.dependencyCount = 1;
+		passInfo.pDependencies = &deps;
 
 		VkRenderPass rpass = VK_NULL_HANDLE;
 		if (auto const res = vkCreateRenderPass(aWindow.device, &passInfo, nullptr, &rpass); VK_SUCCESS != res)
@@ -986,7 +1141,7 @@ namespace
 
 		return lut::RenderPass(aWindow.device, rpass);
 	}
-	*/
+	
 
 	lut::PipelineLayout create_coloured_pipeline_layout(lut::VulkanContext const& aContext, VkDescriptorSetLayout aSceneLayout)
 	{
@@ -1483,12 +1638,32 @@ namespace
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &aCmdBuff;
-		submitInfo.waitSemaphoreCount = 1;
-		submitInfo.pWaitSemaphores = &aWaitSemaphore;
 		submitInfo.pWaitDstStageMask = &waitPipelineStages;
-		submitInfo.signalSemaphoreCount = 1;
-		submitInfo.pSignalSemaphores = &aSignalSemaphore;
 
+		if (aWaitSemaphore)
+		{
+			submitInfo.waitSemaphoreCount = 1;
+			submitInfo.pWaitSemaphores = &aWaitSemaphore;
+		}
+
+		else
+		{
+			submitInfo.waitSemaphoreCount = 0;
+			submitInfo.pWaitSemaphores = nullptr;
+		}
+
+		if (aSignalSemaphore)
+		{
+			submitInfo.signalSemaphoreCount = 1;
+			submitInfo.pSignalSemaphores = &aSignalSemaphore;
+		}
+
+		else
+		{
+			submitInfo.signalSemaphoreCount = 0;
+			submitInfo.pSignalSemaphores = nullptr;
+		}
+		
 		if (auto const res = vkQueueSubmit(aWindow.graphicsQueue, 1, &submitInfo, aFence); VK_SUCCESS != res)
 		{
 			throw lut::Error("Unable to submit command buffer to queue\n" "vkQueueSubmit() returned %s", lut::to_string(res).c_str());
@@ -1745,101 +1920,195 @@ namespace
 			colSize,
 			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-		);
+				);
 
-		void* posPtr = nullptr;
-		if (auto const res = vmaMapMemory(aAllocator.allocator, posStaging.allocation, &posPtr); VK_SUCCESS != res)
+				void* posPtr = nullptr;
+				if (auto const res = vmaMapMemory(aAllocator.allocator, posStaging.allocation, &posPtr); VK_SUCCESS != res)
+				{
+					throw lut::Error("Mapping memory for writing\n" "vmaMapMemory() returned %s", lut::to_string(res).c_str());
+				}
+
+				std::memcpy(posPtr, aPositions, posSize);
+				vmaUnmapMemory(aAllocator.allocator, posStaging.allocation);
+
+				void* colPtr = nullptr;
+				if (auto const res = vmaMapMemory(aAllocator.allocator, colStaging.allocation, &colPtr); VK_SUCCESS != res)
+				{
+					throw lut::Error("Mapping memory for writing\n" "vmaMapMemory() returned %s", lut::to_string(res).c_str());
+				}
+
+				std::memcpy(colPtr, aColor, colSize);
+				vmaUnmapMemory(aAllocator.allocator, colStaging.allocation);
+
+				//Prepare for issuing the transfer commands that copy data from staging buffers to final on-GPU buffers
+				//First, ensure that Vulkan resources are alive until all transfers are completed
+				lut::Fence uploadComplete = lut::create_fence(aContext);
+
+				//Queue data uploads from staging buffers to final buffers
+				//Use a separate command pool for simplicity
+				lut::CommandPool uploadPool = lut::create_command_pool(aContext);
+				VkCommandBuffer uploadCmd = lut::alloc_command_buffer(aContext, uploadPool.handle);
+
+				//Record copy commands into command buffer
+				VkCommandBufferBeginInfo beginInfo{};
+				beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+				beginInfo.flags = 0;
+				beginInfo.pInheritanceInfo = nullptr;
+
+				if (auto const res = vkBeginCommandBuffer(uploadCmd, &beginInfo); VK_SUCCESS != res)
+				{
+					throw lut::Error("Beginning command buffer recording\n" "vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str());
+				}
+
+				VkBufferCopy pcopy{};
+				pcopy.size = posSize;
+
+				vkCmdCopyBuffer(uploadCmd, posStaging.buffer, vertexPosGPU.buffer, 1, &pcopy);
+
+				lut::buffer_barrier(
+					uploadCmd,
+					vertexPosGPU.buffer,
+					VK_ACCESS_TRANSFER_WRITE_BIT,
+					VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT,
+					VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
+				);
+
+				VkBufferCopy ccopy{};
+				ccopy.size = colSize;
+
+				vkCmdCopyBuffer(uploadCmd, colStaging.buffer, vertexColGPU.buffer, 1, &ccopy);
+
+				lut::buffer_barrier(
+					uploadCmd,
+					vertexColGPU.buffer,
+					VK_ACCESS_TRANSFER_WRITE_BIT,
+					VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT,
+					VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
+				);
+
+				if (auto const res = vkEndCommandBuffer(uploadCmd); VK_SUCCESS != res)
+				{
+					throw lut::Error("Ending command buffer recording\n" "vkEndCommandBuffer() returned %s", lut::to_string(res).c_str());
+				}
+
+				//Submit transfer commands
+				VkSubmitInfo submitInfo{};
+				submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+				submitInfo.commandBufferCount = 1;
+				submitInfo.pCommandBuffers = &uploadCmd;
+
+				if (auto const res = vkQueueSubmit(aContext.graphicsQueue, 1, &submitInfo, uploadComplete.handle); VK_SUCCESS != res)
+				{
+					throw lut::Error("Submitting commands\n" "vkQueueSubmit() returned %s", lut::to_string(res).c_str());
+				}
+
+				//Wait for commands to finish before destroying temporary resources needed for transfers
+				if (auto const res = vkWaitForFences(aContext.device, 1, &uploadComplete.handle, VK_TRUE, std::numeric_limits<std::uint64_t>::max()); VK_SUCCESS != res)
+				{
+					throw lut::Error("Waiting for upload to complete\n" "vkWaitForFences() returned %s", lut::to_string(res).c_str());
+				}
+
+				ColorizedMesh colorMesh;
+				colorMesh.positions = std::move(vertexPosGPU);
+				colorMesh.colors = std::move(vertexColGPU);
+				colorMesh.vertexCount = std::uint32_t(aVertCount);
+				return colorMesh;
+	}
+}
+
+//ImGui Functions
+namespace {
+
+	void InitImgui()
+	{
+		//Setup dear Imgui Context
+		IMGUI_CHECKVERSION();
+
+		ImGui::CreateContext();
+		ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+		ImGui::StyleColorsDark();
+	}
+
+	//Begin SingleTime commands
+	//Makes following the tutorial simpler
+	VkCommandBuffer beginSingleTimeCommands(lut::VulkanContext const& aContext, VkCommandPool aCmdPool)
+	{
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = aCmdPool;
+		allocInfo.commandBufferCount = 1;
+
+		VkCommandBuffer commandBuffer;
+		if (auto const res = vkAllocateCommandBuffers(aContext.device, &allocInfo, &commandBuffer); VK_SUCCESS != res)
 		{
-			throw lut::Error("Mapping memory for writing\n" "vmaMapMemory() returned %s", lut::to_string(res).c_str());
+			throw lut::Error("Unable to allocate command buffer\n" "vkAllocateCommandBuffer() returned %s", lut::to_string(res).c_str());
 		}
 
-		std::memcpy(posPtr, aPositions, posSize);
-		vmaUnmapMemory(aAllocator.allocator, posStaging.allocation);
+		VkCommandBufferBeginInfo begInfo{};
+		begInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		begInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-		void* colPtr = nullptr;
-		if (auto const res = vmaMapMemory(aAllocator.allocator, colStaging.allocation, &colPtr); VK_SUCCESS != res)
+		if (auto const res = vkBeginCommandBuffer(commandBuffer, &begInfo); VK_SUCCESS != res)
 		{
-			throw lut::Error("Mapping memory for writing\n" "vmaMapMemory() returned %s", lut::to_string(res).c_str());
+			throw lut::Error("Unable to begin recording command buffer\n" "vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str());
 		}
 
-		std::memcpy(colPtr, aColor, colSize);
-		vmaUnmapMemory(aAllocator.allocator, colStaging.allocation);
+		return commandBuffer;
 
-		//Prepare for issuing the transfer commands that copy data from staging buffers to final on-GPU buffers
-		//First, ensure that Vulkan resources are alive until all transfers are completed
-		lut::Fence uploadComplete = lut::create_fence(aContext);
+	}
 
-		//Queue data uploads from staging buffers to final buffers
-		//Use a separate command pool for simplicity
-		lut::CommandPool uploadPool = lut::create_command_pool(aContext);
-		VkCommandBuffer uploadCmd = lut::alloc_command_buffer(aContext, uploadPool.handle);
+	void endSingleTimeCommands(lut::VulkanContext const& aContext, VkCommandBuffer commandBuffer, VkCommandPool aCpool)
+	{
 
-		//Record copy commands into command buffer
-		VkCommandBufferBeginInfo beginInfo{};
-		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		beginInfo.flags = 0;
-		beginInfo.pInheritanceInfo = nullptr;
+		vkEndCommandBuffer(commandBuffer);
 
-		if (auto const res = vkBeginCommandBuffer(uploadCmd, &beginInfo); VK_SUCCESS != res)
-		{
-			throw lut::Error("Beginning command buffer recording\n" "vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str());
-		}
-
-		VkBufferCopy pcopy{};
-		pcopy.size = posSize;
-
-		vkCmdCopyBuffer(uploadCmd, posStaging.buffer, vertexPosGPU.buffer, 1, &pcopy);
-
-		lut::buffer_barrier(
-			uploadCmd,
-			vertexPosGPU.buffer,
-			VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
-		);
-
-		VkBufferCopy ccopy{};
-		ccopy.size = colSize;
-
-		vkCmdCopyBuffer(uploadCmd, colStaging.buffer, vertexColGPU.buffer, 1, &ccopy);
-
-		lut::buffer_barrier(
-			uploadCmd,
-			vertexColGPU.buffer,
-			VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_PIPELINE_STAGE_VERTEX_INPUT_BIT
-		);
-
-		if (auto const res = vkEndCommandBuffer(uploadCmd); VK_SUCCESS != res)
-		{
-			throw lut::Error("Ending command buffer recording\n" "vkEndCommandBuffer() returned %s", lut::to_string(res).c_str());
-		}
-
-		//Submit transfer commands
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &uploadCmd;
+		submitInfo.pCommandBuffers = &commandBuffer;
 
-		if (auto const res = vkQueueSubmit(aContext.graphicsQueue, 1, &submitInfo, uploadComplete.handle); VK_SUCCESS != res)
+		vkQueueSubmit(aContext.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		vkQueueWaitIdle(aContext.graphicsQueue);
+
+		vkFreeCommandBuffers(aContext.device, aCpool, 1, &commandBuffer);
+
+	}
+
+	void create_imgui_framebuffers(lut::VulkanWindow const& aWindow, VkRenderPass aRenderPass, std::vector<lut::Framebuffer>& aFramebuffers)
+	{
+		assert(aFramebuffers.empty());
+
+		for (std::size_t i = 0; i < aWindow.swapViews.size(); ++i)
 		{
-			throw lut::Error("Submitting commands\n" "vkQueueSubmit() returned %s", lut::to_string(res).c_str());
+			VkImageView attachments[] =
+			{
+				aWindow.swapViews[i]
+			};
+
+			VkFramebufferCreateInfo fbInfo{};
+			fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			fbInfo.flags = 0;
+			fbInfo.renderPass = aRenderPass;
+			fbInfo.attachmentCount = 1;
+			fbInfo.pAttachments = attachments;
+			fbInfo.width = aWindow.swapchainExtent.width;
+			fbInfo.height = aWindow.swapchainExtent.height;
+			fbInfo.layers = 1;
+
+			VkFramebuffer fb = VK_NULL_HANDLE;
+			if (auto const res = vkCreateFramebuffer(aWindow.device, &fbInfo, nullptr, &fb); VK_SUCCESS != res)
+			{
+				throw lut::Error("Unable to create imgui framebuffer for swap chain image %zu\n" "vkCreateFramebuffer() returned %s", i, lut::to_string(res).c_str());
+			}
+
+			aFramebuffers.emplace_back(lut::Framebuffer(aWindow.device, fb));
 		}
 
-		//Wait for commands to finish before destroying temporary resources needed for transfers
-		if (auto const res = vkWaitForFences(aContext.device, 1, &uploadComplete.handle, VK_TRUE, std::numeric_limits<std::uint64_t>::max()); VK_SUCCESS != res)
-		{
-			throw lut::Error("Waiting for upload to complete\n" "vkWaitForFences() returned %s", lut::to_string(res).c_str());
-		}
-
-		ColorizedMesh colorMesh;
-		colorMesh.positions = std::move(vertexPosGPU);
-		colorMesh.colors = std::move(vertexColGPU);
-		colorMesh.vertexCount = std::uint32_t(aVertCount);
-		return colorMesh;
+		assert(aWindow.swapViews.size() == aFramebuffers.size());
 	}
 }
 
