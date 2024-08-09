@@ -136,7 +136,7 @@ namespace
 
 		bool wasMousing = false;
 
-		glm::mat4 camera2world = glm::identity<glm::mat4>();
+		glm::mat4 camera2world = glm::identity<glm::mat4>() * glm::translate(glm::vec3({0, 8, 0}));
 	};
 
 	//Helpful structs
@@ -254,27 +254,24 @@ int main() try
 	lut::PipelineLayout texturedPipeLayout = create_textured_pipeline_layout(window, sceneLayout.handle, objectLayout.handle);
 	lut::PipelineLayout colouredPipeLayout = create_coloured_pipeline_layout(window, sceneLayout.handle);
 
+	//Pipelines for the different rendering modes
 	lut::Pipeline colouredPipe, texturedPipe;
+	lut::Pipeline mipmapColouredPipe, mipmapTexturedPipe;
+	lut::Pipeline depthColouredPipe, depthTexturedPipe;
+	lut::Pipeline depthPartialColouredPipe, depthPartialTexturedPipe;
+	
 
-#if defined(MAIN) || defined(ANISOTROPIC)
 	colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
 	texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTextureFragShaderPath);
-#endif // MAIN
 
-#ifdef MIPMAP
-	colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
-	texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragMipmapShaderPath);
-#endif
+	mipmapColouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
+	mipmapTexturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragMipmapShaderPath);
 
-#ifdef FRAGDEPTH
-	colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColFragDepthShaderPath);
-	texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthShaderPath);
-#endif
+	depthColouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColFragDepthShaderPath);
+	depthTexturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthShaderPath);
 
-#ifdef FRAGDEPTHPARTIAL
-	colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColFragDepthPartialShaderPath);
-	texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthPartialShaderPath);
-#endif
+	depthPartialColouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColFragDepthPartialShaderPath);
+	depthPartialTexturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthPartialShaderPath);
 
 	auto [depthBuffer, depthBufferView] = create_depth_buffer(window, allocator);
 
@@ -409,7 +406,7 @@ int main() try
 	}
 
 	//Create default texture sampler (required for descriptor set)
-	lut::Sampler defaultSampler = lut::create_default_sampler(window);
+	lut::Sampler defaultSampler = lut::create_default_sampler(window, false);
 
 	//Create descriptor sets
 	std::vector<VkDescriptorSet> meshDescriptorSets(texturedMeshes.size());
@@ -437,6 +434,38 @@ int main() try
 
 		vkUpdateDescriptorSets(window.device, numSets, desc, 0, nullptr);
 	}
+
+	//Perform the same but with anisotropic filtering
+	lut::Sampler anistropicSampler = lut::create_default_sampler(window, true);
+
+
+	std::vector<VkDescriptorSet> anisotropicMeshDescSets(texturedMeshes.size());
+
+	for (size_t i = 0; i < anisotropicMeshDescSets.size(); i++)
+	{
+		anisotropicMeshDescSets[i] = lut::alloc_desc_set(window, dpool.handle, objectLayout.handle);
+
+		//Update descriptor set
+		VkWriteDescriptorSet desc[1]{};
+
+		VkDescriptorImageInfo textureInfo{};
+		textureInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		textureInfo.imageView = imageViews.at(i).handle;
+		textureInfo.sampler = anistropicSampler.handle;
+
+		desc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		desc[0].dstSet = anisotropicMeshDescSets[i];
+		desc[0].dstBinding = 0;
+		desc[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		desc[0].descriptorCount = 1;
+		desc[0].pImageInfo = &textureInfo;
+
+		constexpr auto numSets = sizeof(desc) / sizeof(desc[0]);
+
+		vkUpdateDescriptorSets(window.device, numSets, desc, 0, nullptr);
+	}
+
+
 	/*
 #ifdef OVERDRAW
 	//Setting up storage image for overdrawing visualization
@@ -582,6 +611,14 @@ int main() try
 
 	lut::Semaphore imguiSemaphore = lut::create_semaphore(window);
 
+	bool anisotropicUsed = false;
+	int renderMode = 0;
+
+	lut::Pipeline* usedColourPipe = &colouredPipe;
+	lut::Pipeline* usedTexturePipe = &texturedPipe;
+
+	const char* choices[] = { "Standard", "MipMap", "Frag Depth", "Partial Frag Depth" };
+	int numChoices = sizeof(choices) / sizeof(choices[0]);
 
 	// Application main loop
 	bool recreateSwapchain = false;
@@ -631,26 +668,16 @@ int main() try
 
 			if (changes.changedSize)
 			{
-#if defined(MAIN) || defined(ANISOTROPIC)
+
+				//Create pipelines that adapt to the new window
 				colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
 				texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTextureFragShaderPath);
-#endif 
-
-#ifdef MIPMAP
-				colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
-				texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragMipmapShaderPath);
-#endif
-
-
-#ifdef FRAGDEPTH
-				colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
-				texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthShaderPath);
-#endif
-
-#ifdef FRAGDEPTHPARTIAL
-				colouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
-				texturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthPartialShaderPath);
-#endif
+				mipmapColouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColourFragShaderPath);
+				mipmapTexturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragMipmapShaderPath);
+				depthColouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColFragDepthShaderPath);
+				depthTexturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthShaderPath);
+				depthPartialColouredPipe = create_coloured_pipeline(window, renderPass.handle, colouredPipeLayout.handle, cfg::kColourVertShaderPath, cfg::kColFragDepthPartialShaderPath);
+				depthPartialTexturedPipe = create_textured_pipeline(window, renderPass.handle, texturedPipeLayout.handle, cfg::kTextureVertShaderPath, cfg::kTexFragDepthPartialShaderPath);
 
 			}
 
@@ -742,15 +769,24 @@ int main() try
 		vkCmdBeginRenderPass(cbuffers[imageIndex], &passInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 		//Draw with the textured pipeline
-		vkCmdBindPipeline(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, texturedPipe.handle);
+		vkCmdBindPipeline(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, usedTexturePipe->handle);
 
 		//Bind the descriptors
 		vkCmdBindDescriptorSets(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, texturedPipeLayout.handle, 0, 1, &sceneDescriptors, 0, nullptr);
 
+		//Find out which vector of descriptor sets to use
+		std::vector<VkDescriptorSet>* desiredSet;
+		if (anisotropicUsed)
+			desiredSet = &anisotropicMeshDescSets;
+		else
+			desiredSet = &meshDescriptorSets;
+		
+
+
 		//Bind the textured meshes and draw
 		for (size_t i = 0; i < texturedMeshes.size(); i++)
 		{
-			vkCmdBindDescriptorSets(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, texturedPipeLayout.handle, 1, 1, &meshDescriptorSets[i], 0, nullptr);
+			vkCmdBindDescriptorSets(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, texturedPipeLayout.handle, 1, 1, &desiredSet->at(i), 0, nullptr);
 
 			VkBuffer meshBuffers[2] = { texturedMeshes.at(i).positions.buffer, texturedMeshes.at(i).texcoords.buffer };
 			VkDeviceSize meshOffsets[2] = {};
@@ -762,7 +798,7 @@ int main() try
 		}
 
 		//Now bind the coloured meshes
-		vkCmdBindPipeline(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, colouredPipe.handle);
+		vkCmdBindPipeline(cbuffers[imageIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, usedColourPipe->handle);
 
 		//Draw all coloured meshes
 		for (size_t i = 0; i < colouredMeshes.size(); i++)
@@ -824,8 +860,35 @@ int main() try
 		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 		ImGui::NewFrame();
-		ImGui::Begin("This finally works!");
-		ImGui::Text("This is text to show that works?");
+		ImGui::Begin("ImGui Window");
+		ImGui::Text("Edit the scene using these filters");
+		ImGui::Checkbox("Anisotropic Filtering", &anisotropicUsed);
+		if (ImGui::Combo("Render Mode", &renderMode, choices, numChoices))
+		{
+			if (renderMode == 0)
+			{
+				usedColourPipe = &colouredPipe;
+				usedTexturePipe = &texturedPipe;
+			}
+
+			if (renderMode == 1)
+			{
+				usedColourPipe = &mipmapColouredPipe;
+				usedTexturePipe = &mipmapTexturedPipe;
+			}
+
+			if (renderMode == 2)
+			{
+				usedColourPipe = &depthColouredPipe;
+				usedTexturePipe = &depthTexturedPipe;
+			}
+
+			if (renderMode == 3)
+			{
+				usedColourPipe = &depthPartialColouredPipe;
+				usedTexturePipe = &depthPartialTexturedPipe;
+			}
+		}
 		ImGui::End();
 
 

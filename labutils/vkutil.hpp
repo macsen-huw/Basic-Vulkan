@@ -50,6 +50,6 @@ namespace labutils
 
 	ImageView create_image_view_texture2d(VulkanContext const&, VkImage, VkFormat);
 
-	Sampler create_default_sampler(VulkanContext const&);
+	Sampler create_default_sampler(VulkanContext const&, bool anisotropic);
 
 }

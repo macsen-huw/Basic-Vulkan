@@ -236,7 +236,7 @@ namespace labutils
 		return ImageView(aContext.device, view);
 	}
 
-	Sampler create_default_sampler(VulkanContext const& aContext)
+	Sampler create_default_sampler(VulkanContext const& aContext, bool anisotropic)
 	{
 		VkSamplerCreateInfo samplerInfo{};
 
@@ -251,22 +251,25 @@ namespace labutils
 		samplerInfo.mipLodBias = 0.5f;
 
 
-		#ifdef ANISOTROPIC
-		//Check whether anisotropic filtering is enabled
-		VkPhysicalDeviceFeatures supportedFeatures;
-		vkGetPhysicalDeviceFeatures(aContext.physicalDevice, &supportedFeatures);
-
-		if (supportedFeatures.samplerAnisotropy)
+		if (anisotropic)
 		{
-			samplerInfo.anisotropyEnable = VK_TRUE;
+			//Check whether anisotropic filtering is enabled
+			VkPhysicalDeviceFeatures supportedFeatures;
+			vkGetPhysicalDeviceFeatures(aContext.physicalDevice, &supportedFeatures);
 
-			//Get the maximum anisotropy from the device
-			VkPhysicalDeviceProperties deviceProperties;
-			vkGetPhysicalDeviceProperties(aContext.physicalDevice, &deviceProperties);
+			if (supportedFeatures.samplerAnisotropy)
+			{
+				samplerInfo.anisotropyEnable = VK_TRUE;
 
-			samplerInfo.maxAnisotropy = deviceProperties.limits.maxSamplerAnisotropy;
+				//Get the maximum anisotropy from the device
+				VkPhysicalDeviceProperties deviceProperties;
+				vkGetPhysicalDeviceProperties(aContext.physicalDevice, &deviceProperties);
+
+				samplerInfo.maxAnisotropy = deviceProperties.limits.maxSamplerAnisotropy;
+			}
 		}
-		#endif
+	
+	
 		
 		VkSampler sampler = VK_NULL_HANDLE;
 		if (auto const res = vkCreateSampler(aContext.device, &samplerInfo, nullptr, &sampler); VK_SUCCESS != res)
