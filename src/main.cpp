@@ -55,7 +55,7 @@ namespace
 	{
 		// Compiled shader code for the graphics pipeline
 		// See sources in exercise4/shaders/*. 
-#		define SHADERDIR_ "assets/cw1/shaders/"
+#		define SHADERDIR_ "assets/src/shaders/"
 		constexpr char const* kTextureVertShaderPath = SHADERDIR_ "defaultTex.vert.spv";
 		constexpr char const* kTextureFragShaderPath = SHADERDIR_ "defaultTex.frag.spv";
 
@@ -293,7 +293,7 @@ int main() try
 	lut::Semaphore renderFinished = lut::create_semaphore(window);
 
 	//Load the mesh
-	SimpleModel meshes = load_simple_wavefront_obj("assets/cw1/sponza_with_ship.obj");
+	SimpleModel meshes = load_simple_wavefront_obj("assets/src/sponza_with_ship.obj");
 
 	//Data structure to store all ColourizedMeshes
 	std::vector<ColorizedMesh> colouredMeshes;

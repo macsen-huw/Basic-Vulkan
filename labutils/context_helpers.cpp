@@ -76,7 +76,7 @@ namespace labutils::detail
 		// pre-1.3 implementations).
 		VkApplicationInfo appInfo{};
 		appInfo.sType  = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-		appInfo.pApplicationName    = "COMP5822-cw1";
+		appInfo.pApplicationName    = "Basic-Vulkan";
 		appInfo.applicationVersion  = 2023; // academic year of 2023/24
 		appInfo.apiVersion          = VK_MAKE_API_VERSION( 0, 1, 3, 0 ); // Version 1.3
 

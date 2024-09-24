@@ -1,4 +1,4 @@
-workspace "COMP5822M-coursework1"
+workspace "Vulkan-Basic"
 	language "C++"
 	cppdialect "C++17"
 	--cppdialect "C++20"
@@ -9,7 +9,7 @@ workspace "COMP5822M-coursework1"
 	flags "NoPCH"
 	flags "MultiProcessorCompile"
 
-	startproject "cw1"
+	startproject "src"
 
 	debugdir "%{wks.location}"
 	objdir "_build_/%{cfg.buildcfg}-%{cfg.platform}-%{cfg.toolset}"
@@ -63,19 +63,19 @@ include "third_party"
 dofile( "util/glslc.lua" )
 
 -- Projects
-project "cw1"
+project "basic-vulkan"
 	local sources = { 
-		"cw1/**.cpp",
-		"cw1/**.hpp",
-		"cw1/**.hxx"
+		"src/**.cpp",
+		"src/**.hpp",
+		"src/**.hxx"
 	}
 
 	kind "ConsoleApp"
-	location "cw1"
+	location "src"
 
 	files( sources )
 
-	dependson "cw1-shaders"
+	dependson "shaders"
 
 	links "labutils"
 	links "x-volk"
@@ -87,22 +87,22 @@ project "cw1"
 	dependson "x-glm" 
 	dependson "x-rapidobj"
 
-project "cw1-shaders"
+project "shaders"
 	local shaders = { 
-		"cw1/shaders/*.vert",
-		"cw1/shaders/*.frag",
-		"cw1/shaders/*.comp",
-		"cw1/shaders/*.geom",
-		"cw1/shaders/*.tesc",
-		"cw1/shaders/*.tese"
+		"src/shaders/*.vert",
+		"src/shaders/*.frag",
+		"src/shaders/*.comp",
+		"src/shaders/*.geom",
+		"src/shaders/*.tesc",
+		"src/shaders/*.tese"
 	}
 
 	kind "Utility"
-	location "cw1/shaders"
+	location "src/shaders"
 
 	files( shaders )
 
-	handle_glsl_files( "-O", "assets/cw1/shaders", {} )
+	handle_glsl_files( "-O", "assets/src/shaders", {} )
 
 project "labutils"
 	local sources = { 
